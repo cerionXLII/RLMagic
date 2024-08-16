@@ -2,14 +2,6 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-# from gymnasium.envs.registration import register
-
-
-# register(
-#      id="ScheduleGym-v0",
-#      entry_point="src:ScheduleGym",
-#      #max_episode_steps=300,
-# )
 
 #Create a class for the schedule problem using the gym interface
 class ScheduleGym(gym.Env):
@@ -23,18 +15,10 @@ class ScheduleGym(gym.Env):
         self.schedule = -1*np.ones((num_classes, num_days, num_hours), dtype=int) # Schedule for each class, -1 means no subject assigned
         self.num_actions_left = 1000 #Number of actions left to take
         self.verbose = verbose #Debug on or off
-        #This is to go from a one dimensional action space to a 4 dimensional action space
-        #class_id, day, hour, subject_id
-        self.max_values = np.array([num_classes, num_days, num_hours, num_subjects])
-        self.cumprod_max_values = np.cumprod(self.max_values[::-1])[::-1]
-        # self.decoder_base = np.cumprod(self.max_values)
-        # self.encoder_base = np.flip(np.cumprod(np.flip(self.max_values)))
         self.initial_hours_to_assign = 0 #How many hours we have initially to assign, used to calculate score later
         self.render_mode = render_mode
         self.action_space = spaces.MultiDiscrete(self.get_action_sizes())
-        #self.observation_space = spaces.MultiDiscrete(self.get_state_sizes())
         self.observation_space = spaces.Box(low=0, high=1, shape=self.get_state_sizes(), dtype=np.float32)
-        self.metadata =  {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
     def reset(self, seed=None):
         super().reset(seed=seed)
@@ -52,7 +36,7 @@ class ScheduleGym(gym.Env):
         
         #Return the current state,info
         info = {}
-        #return (self.target_hours, self.schedule), info
+
         return self.state2vector(), info
     
     def state2vector(self):
@@ -73,54 +57,18 @@ class ScheduleGym(gym.Env):
         for class_id in range(self.num_classes):
             print(f"Class {class_id + 1}: {self.target_hours[class_id]}")
 
-
-
-    def decode_action(self, actions):
-        actions = np.array(actions).reshape(-1) # Ensure numbers is a 1D column array
-        aAll = np.zeros((actions.shape[0], len(self.max_values)), dtype=int)
-        for i in range(len(self.max_values) - 1):
-            aAll[:, i] = actions // self.cumprod_max_values[i+1]
-            actions -= aAll[:, i]*self.cumprod_max_values[i+1]
-        aAll[:,-1] = actions
-        
-        return aAll
-    
-    # Go from a 4D action to a 1D action
-    def encode_action(self, actions):
-        number = np.zeros(actions.shape[0], dtype=int)
-        for i in range(len(self.max_values) - 1):
-            number += actions[:,i]*self.cumprod_max_values[i+1]
-        number += actions[:,-1]
-        
-        return number
-
-      
-    
     def step(self, action):
         # Update the schedule based on the action
 
-        #Check if the action is a tuple or a single value
-        if isinstance(action, tuple):
-            #We are already in the decoded format
-            class_id, day, hour, subject_id = action
-        elif isinstance(action, np.ndarray):
-            class_id = action[0]
-            day = action[1]
-            hour= action[2]
-            subject_id = action[3]
-        else:
-            #Need to go from 1D to 4D
-            decoded = self.decode_action(action).squeeze()
-            class_id = decoded[0]
-            day = decoded[1]
-            hour= decoded[2]
-            subject_id = decoded[3]
-
+        add_action = (action[0] == 1) # 1 is add, 0 is remove
+        class_id = action[1]
+        day = action[2]
+        hour= action[3]
+        subject_id = action[4]
          
-        #If subject_id is >= num_subjects then this is a remove action for the class_id, day, hour slot
-        #If the slot is already occupied, then the old subject will be placed back into the target hours
         
         current_subject_id = self.schedule[class_id, day, hour]
+        
 
         pre_action_fitness = self.fitness()
         reward = -1.1 #Cost of performing an action
@@ -133,19 +81,24 @@ class ScheduleGym(gym.Env):
         #The slot was already booked, lets reomove it (and all of its dependencies)
         result = "N/A"
         
-        if current_subject_id != -1:
+        #Lets see if it is an add action and if it is valid
+        if (add_action and
+            current_subject_id == -1 and #Slot is empty
+            subject_id < self.num_subjects and #Not out of bounds
+            self.target_hours[class_id, subject_id] > 0): #We have hours to assign
+
+            #All valid, lets add it
+            self.schedule[class_id, day, hour] = subject_id
+            self.target_hours[class_id, subject_id] -= 1
+            result = "Added"
+
+        elif current_subject_id != -1:
+            #It is a remove action, and there is a subject in the slot
             self.schedule[class_id, day, hour] = -1
             self.target_hours[class_id, current_subject_id] += 1
             result = "Removed"
 
-        
-        #See if it is an add action
-        elif subject_id < self.num_subjects:
-            #Yes its an add action, lets see if we have enough hours to actually add it
-            if self.target_hours[class_id, subject_id] > 0:
-                self.schedule[class_id, day, hour] = subject_id
-                self.target_hours[class_id, subject_id] -= 1
-                result = "Added"
+
 
         self.num_actions_left -= 1
 
@@ -180,8 +133,10 @@ class ScheduleGym(gym.Env):
     
     def get_action_sizes(self):
         #Return the sizes of the action space
-        return [self.num_classes, self.num_days, self.num_hours, self.num_subjects]
-        #return np.prod(self.max_values)
+        #return [self.num_classes, self.num_days, self.num_hours, self.num_subjects]
+        #First action is add/remove action. If it is 1, we add a subject if it is 0 we remove a subject
+        return [2, self.num_classes, self.num_days, self.num_hours, self.num_subjects] 
+        
     
     def get_state_sizes(self):
         #Return the shapes of the state space
